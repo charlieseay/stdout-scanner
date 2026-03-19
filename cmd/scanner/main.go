@@ -89,6 +89,9 @@ func runScan(args []string) {
 	scanNetwork := fs.Bool("scan-network", false, "Enable network device discovery (overrides config)")
 	subnets := fs.String("subnets", "", "Subnet(s) to scan, comma-separated (e.g. 192.168.0.0/24)")
 	scanSNMP := fs.Bool("scan-snmp", true, "Attempt SNMP queries on discovered devices")
+	scanDNS := fs.Bool("scan-dns", false, "Enable DNS/service discovery (overrides config)")
+	scanAuth := fs.Bool("scan-auth", false, "Enable auth detection (overrides config)")
+	fullScan := fs.Bool("full", false, "Enable all discovery modules")
 	dryRun := fs.Bool("dry-run", false, "Discover but don't push to StdOut")
 	showVersion := fs.Bool("version", false, "Print version and exit")
 	fs.Parse(args)
@@ -120,8 +123,23 @@ func runScan(args []string) {
 	if *skipMetrics {
 		cfg.Modules.Metrics = false
 	}
+	if *fullScan {
+		cfg.Modules.Docker = true
+		cfg.Modules.Metrics = true
+		cfg.Modules.Network = true
+		cfg.Modules.DNS = true
+		cfg.Modules.Auth = true
+	}
 	if *scanNetwork {
 		cfg.Modules.Network = true
+	}
+	if *scanDNS {
+		cfg.Modules.DNS = true
+		cfg.Modules.Network = true // DNS requires network scan first
+	}
+	if *scanAuth {
+		cfg.Modules.Auth = true
+		cfg.Modules.Network = true // Auth requires network scan first
 	}
 	if *subnets != "" {
 		cfg.Modules.Network = true
@@ -224,6 +242,32 @@ func runScan(args []string) {
 		modules = append(modules, "network")
 	}
 
+	// Collect all discovered devices (from all subnet scans) for DNS/auth
+	var allDevices []network.Device
+	for _, ns := range networkDevices {
+		allDevices = append(allDevices, ns.Devices...)
+	}
+
+	// DNS & service discovery
+	var dnsResults []network.DNSResult
+	if cfg.Modules.DNS && len(allDevices) > 0 {
+		fmt.Fprintln(os.Stderr, "Running DNS & service discovery...")
+		ctx := context.Background()
+		dnsResults = network.DiscoverDNS(ctx, allDevices)
+		fmt.Fprintf(os.Stderr, "  DNS results for %d hosts\n", len(dnsResults))
+		modules = append(modules, "dns")
+	}
+
+	// Auth detection
+	var authResults []network.AuthResult
+	if cfg.Modules.Auth && len(allDevices) > 0 {
+		fmt.Fprintln(os.Stderr, "Detecting authentication...")
+		ctx := context.Background()
+		authResults = network.DetectAuth(ctx, allDevices)
+		fmt.Fprintf(os.Stderr, "  Auth checked %d hosts\n", len(authResults))
+		modules = append(modules, "auth")
+	}
+
 	// Build scan result
 	scan := output.ScanResult{
 		Version:          "2",
@@ -235,6 +279,8 @@ func runScan(args []string) {
 		ContainerMetrics: containerMetrics,
 		Networks:         networks,
 		NetworkDevices:   networkDevices,
+		DNSResults:       dnsResults,
+		AuthResults:      authResults,
 	}
 
 	// Output mode

@@ -21,6 +21,8 @@ type ScanResult struct {
 	ContainerMetrics []metrics.ContainerMetrics `json:"container_metrics,omitempty"`
 	Networks         []docker.Network         `json:"networks,omitempty"`
 	NetworkDevices   []network.ScanResult     `json:"network_devices,omitempty"`
+	DNSResults       []network.DNSResult      `json:"dns_results,omitempty"`
+	AuthResults      []network.AuthResult     `json:"auth_results,omitempty"`
 }
 
 func Now() string {
@@ -172,6 +174,86 @@ func RenderMarkdown(scan ScanResult) string {
 				if dev.SNMP.Uptime != "" {
 					b.WriteString(fmt.Sprintf("- SNMP Uptime: %s\n", dev.SNMP.Uptime))
 				}
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// DNS & Service Discovery
+	if len(scan.DNSResults) > 0 {
+		b.WriteString("## DNS & Service Discovery\n\n")
+		for _, dns := range scan.DNSResults {
+			label := dns.IP
+			if dns.Hostname != "" {
+				label = fmt.Sprintf("%s (%s)", dns.Hostname, dns.IP)
+				if dns.ForwardMatch {
+					label += " [verified]"
+				}
+			}
+			b.WriteString(fmt.Sprintf("### %s\n", label))
+
+			if dns.ReverseProxy != nil {
+				b.WriteString(fmt.Sprintf("- Reverse Proxy: %s\n", dns.ReverseProxy.Software))
+				if len(dns.ReverseProxy.Domains) > 0 {
+					b.WriteString(fmt.Sprintf("- Proxied Domains: %s\n", strings.Join(dns.ReverseProxy.Domains, ", ")))
+				}
+			}
+
+			for _, cert := range dns.TLSCerts {
+				status := fmt.Sprintf("%d days left", cert.DaysLeft)
+				if cert.DaysLeft <= 0 {
+					status = "EXPIRED"
+				} else if cert.DaysLeft <= 30 {
+					status = fmt.Sprintf("%d days left (expiring soon)", cert.DaysLeft)
+				}
+				if cert.SelfSigned {
+					status += " [self-signed]"
+				}
+				b.WriteString(fmt.Sprintf("- TLS :%d — %s (issuer: %s, %s)\n",
+					cert.Port, cert.Subject, cert.Issuer, status))
+				if len(cert.SANs) > 0 {
+					b.WriteString(fmt.Sprintf("  SANs: %s\n", strings.Join(cert.SANs, ", ")))
+				}
+			}
+
+			if len(dns.MDNSServices) > 0 {
+				b.WriteString("- mDNS Services:\n")
+				for _, svc := range dns.MDNSServices {
+					if svc.Port > 0 {
+						b.WriteString(fmt.Sprintf("  - %s (%s, port %d)\n", svc.Name, svc.Type, svc.Port))
+					} else {
+						b.WriteString(fmt.Sprintf("  - %s (%s)\n", svc.Name, svc.Type))
+					}
+				}
+			}
+
+			b.WriteString("\n")
+		}
+	}
+
+	// Auth Detection
+	if len(scan.AuthResults) > 0 {
+		b.WriteString("## Authentication\n\n")
+		for _, auth := range scan.AuthResults {
+			label := auth.IP
+			if auth.Hostname != "" {
+				label = fmt.Sprintf("%s (%s)", auth.Hostname, auth.IP)
+			}
+			b.WriteString(fmt.Sprintf("### %s\n", label))
+
+			for _, svc := range auth.Services {
+				icon := "open"
+				if !svc.Open {
+					icon = "locked"
+				}
+				line := fmt.Sprintf("- :%d %s — %s", svc.Port, icon, svc.AuthType)
+				if svc.SSOProvider != "" {
+					line += fmt.Sprintf(" (%s)", svc.SSOProvider)
+				}
+				if svc.Service != "" {
+					line += fmt.Sprintf(" [%s]", svc.Service)
+				}
+				b.WriteString(line + "\n")
 			}
 			b.WriteString("\n")
 		}
