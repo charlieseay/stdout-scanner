@@ -97,7 +97,9 @@ func runScan(args []string) {
 	deltaMode := fs.Bool("delta", false, "Compare against previous scan, report changes only")
 	stateFile := fs.String("state-file", "", "Path to store previous scan for delta (default: from config)")
 	scheduleFlag := fs.String("schedule", "", "Run on schedule: hourly, daily, daily@03:00, weekly@sun@03:00")
-	dryRun := fs.Bool("dry-run", false, "Discover but don't push to StdOut")
+	webhookURL := fs.String("webhook", "", "POST scan results to this URL (generic webhook)")
+	saveTo := fs.String("save-to", "", "Save scan results to this JSON file")
+	dryRun := fs.Bool("dry-run", false, "Discover but don't push")
 	showVersion := fs.Bool("version", false, "Print version and exit")
 	fs.Parse(args)
 
@@ -145,6 +147,15 @@ func runScan(args []string) {
 	if *scanAuth {
 		cfg.Modules.Auth = true
 		cfg.Modules.Network = true // Auth requires network scan first
+	}
+	if *webhookURL != "" {
+		cfg.Targets = append(cfg.Targets, config.TargetConfig{
+			Name: "cli-webhook",
+			URL:  *webhookURL,
+		})
+	}
+	if *saveTo != "" {
+		cfg.OutputFile = *saveTo
 	}
 	if *subnets != "" {
 		cfg.Modules.Network = true
@@ -322,16 +333,9 @@ func runScan(args []string) {
 				fmt.Print(delta.RenderMarkdown(diff))
 				return
 			default:
-				// Push delta to StdOut if configured
-				if !*dryRun && cfg.StdOut.Token != "" && cfg.StdOut.URL != "" && diff.HasChanges() {
-					fmt.Fprintln(os.Stderr, "Pushing delta to StdOut...")
-					result, err := api.Push(cfg.StdOut.URL, cfg.StdOut.Token, scan)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Push failed: %v\n", err)
-					} else {
-						fmt.Fprintf(os.Stderr, "Import created: %s\n", result.ImportID)
-						fmt.Fprintf(os.Stderr, "Review at: %s%s\n", cfg.StdOut.URL, result.ReviewURL)
-					}
+				// Push delta if configured and changes exist
+				if !*dryRun && diff.HasChanges() && cfg.HasTargets() {
+					pushToTargets(scan, cfg)
 				} else if *dryRun {
 					enc := json.NewEncoder(os.Stdout)
 					enc.SetIndent("", "  ")
@@ -392,28 +396,65 @@ func emitScan(scan output.ScanResult, outputMode string, dryRun bool, cfg *confi
 	}
 
 	if dryRun {
-		fmt.Fprintln(os.Stderr, "Dry run — not pushing to StdOut")
+		fmt.Fprintln(os.Stderr, "Dry run — not pushing")
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		enc.Encode(scan)
 		return
 	}
 
-	if cfg.StdOut.Token == "" || cfg.StdOut.URL == "" {
-		fmt.Fprintln(os.Stderr, "Error: --token and --url are required (or use --output json/markdown)")
-		fmt.Fprintln(os.Stderr, "Run 'stdout-scanner init' to configure, or pass --token and --url flags.")
+	if !cfg.HasTargets() {
+		fmt.Fprintln(os.Stderr, "No targets configured. Use --output json/markdown, --webhook, --save-to, or --token/--url.")
+		fmt.Fprintln(os.Stderr, "Run 'stdout-scanner init' to configure targets.")
 		os.Exit(1)
 	}
 
-	fmt.Fprintln(os.Stderr, "Pushing results to StdOut...")
-	result, err := api.Push(cfg.StdOut.URL, cfg.StdOut.Token, scan)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Push failed: %v\n", err)
-		os.Exit(1)
+	pushToTargets(scan, cfg)
+}
+
+// pushToTargets sends scan results to all configured targets.
+func pushToTargets(scan output.ScanResult, cfg *config.Config) {
+	// StdOut integration
+	if cfg.StdOut.URL != "" && cfg.StdOut.Token != "" {
+		target := api.StdOutTarget(cfg.StdOut.URL, cfg.StdOut.Token)
+		fmt.Fprintf(os.Stderr, "Pushing to StdOut (%s)...\n", cfg.StdOut.URL)
+		result, err := api.Push(target, scan)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "StdOut push failed: %v\n", err)
+		} else if result.ImportID != "" {
+			fmt.Fprintf(os.Stderr, "Import created: %s\n", result.ImportID)
+			fmt.Fprintf(os.Stderr, "Review at: %s%s\n", cfg.StdOut.URL, result.ReviewURL)
+		} else {
+			fmt.Fprintf(os.Stderr, "Push OK (%d)\n", result.StatusCode)
+		}
 	}
 
-	fmt.Fprintf(os.Stderr, "Import created: %s\n", result.ImportID)
-	fmt.Fprintf(os.Stderr, "Review at: %s%s\n", cfg.StdOut.URL, result.ReviewURL)
+	// Generic webhook targets
+	for _, t := range cfg.Targets {
+		target := api.WebhookTarget(t.URL, t.Token, t.Headers)
+		target.Insecure = t.Insecure
+		label := t.Name
+		if label == "" {
+			label = t.URL
+		}
+		fmt.Fprintf(os.Stderr, "Pushing to %s...\n", label)
+		result, err := api.Push(target, scan)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Webhook %s failed: %v\n", label, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Webhook %s OK (%d)\n", label, result.StatusCode)
+		}
+	}
+
+	// File output
+	if cfg.OutputFile != "" {
+		fmt.Fprintf(os.Stderr, "Saving to %s...\n", cfg.OutputFile)
+		if err := api.PushToFile(cfg.OutputFile, scan); err != nil {
+			fmt.Fprintf(os.Stderr, "File save failed: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Saved.\n")
+		}
+	}
 }
 
 func formatBytesShort(b uint64) string {

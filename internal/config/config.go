@@ -9,16 +9,32 @@ import (
 
 // Config holds all scanner settings, written by `init` and read by `scan`.
 type Config struct {
-	StdOut    StdOutConfig  `yaml:"stdout"`
+	// Output targets — where scan results are sent.
+	// StdOut is one option; generic webhooks and file output also work.
+	StdOut    StdOutConfig    `yaml:"stdout,omitempty"`
+	Targets   []TargetConfig  `yaml:"targets,omitempty"`
+	OutputFile string         `yaml:"output_file,omitempty"` // Save scan JSON to file
+
 	Modules   ModulesConfig `yaml:"modules"`
 	Network   NetworkConfig `yaml:"network,omitempty"`
 	Schedule  string        `yaml:"schedule,omitempty"`
 	StateFile string        `yaml:"state_file,omitempty"`
 }
 
+// StdOutConfig is the StdOut-specific integration.
+// Kept as a top-level field for backward compatibility.
 type StdOutConfig struct {
 	URL   string `yaml:"url"`
 	Token string `yaml:"token"`
+}
+
+// TargetConfig describes a generic webhook target.
+type TargetConfig struct {
+	Name     string            `yaml:"name"`               // human label
+	URL      string            `yaml:"url"`                // POST endpoint
+	Token    string            `yaml:"token,omitempty"`     // Bearer token
+	Headers  map[string]string `yaml:"headers,omitempty"`   // extra headers
+	Insecure bool              `yaml:"insecure,omitempty"`  // skip TLS verify
 }
 
 type ModulesConfig struct {
@@ -86,4 +102,12 @@ func Defaults() *Config {
 		},
 		StateFile: "/data/last-scan.json",
 	}
+}
+
+// HasTargets returns true if any output target is configured
+// (StdOut, generic webhooks, or file output).
+func (c *Config) HasTargets() bool {
+	return (c.StdOut.URL != "" && c.StdOut.Token != "") ||
+		len(c.Targets) > 0 ||
+		c.OutputFile != ""
 }

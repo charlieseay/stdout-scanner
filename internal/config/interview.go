@@ -88,34 +88,67 @@ func RunInterview() (*Config, error) {
 
 	fmt.Println()
 
-	// Phase 3: StdOut connection
-	fmt.Printf("  %sStdOut connection%s\n", bold, reset)
-	fmt.Printf("  %s─────────────────%s\n", dim, reset)
+	// Phase 3: Output target
+	fmt.Printf("  %sOutput target%s\n", bold, reset)
+	fmt.Printf("  %s─────────────%s\n", dim, reset)
+	fmt.Println()
+	fmt.Printf("  %sWhere should scan results be sent?%s\n", dim, reset)
+	fmt.Println()
+	fmt.Printf("  %s1)%s StdOut (incident companion — push to your StdOut instance)\n", cyan, reset)
+	fmt.Printf("  %s2)%s Webhook (POST JSON to any URL)\n", cyan, reset)
+	fmt.Printf("  %s3)%s File (save JSON to disk)\n", cyan, reset)
+	fmt.Printf("  %s4)%s None (local output only — use --output json/markdown)\n", cyan, reset)
 	fmt.Println()
 
-	cfg.StdOut.URL = askString(reader, "Instance URL", "")
-	if cfg.StdOut.URL == "" {
-		fmt.Printf("\n  %sNo URL provided — scanner will run in local-only mode.%s\n", yellow, reset)
-		fmt.Printf("  %sUse --output json or --output markdown to view results locally.%s\n", dim, reset)
-	} else {
-		cfg.StdOut.URL = strings.TrimRight(cfg.StdOut.URL, "/")
-		fmt.Println()
-		fmt.Printf("  %sHow do you want to authenticate?%s\n", bold, reset)
-		fmt.Printf("  %s1)%s Paste an existing API token\n", cyan, reset)
-		fmt.Printf("  %s2)%s Create one in the browser at %s/app/tokens\n", cyan, reset, cfg.StdOut.URL)
-		fmt.Println()
-		cfg.StdOut.Token = askString(reader, "API token", "")
-		if cfg.StdOut.Token == "" {
-			fmt.Printf("  %sNo token provided — you can add it later in the config file.%s\n", yellow, reset)
+	targetChoice := askString(reader, "Target [1/2/3/4]", "4")
+
+	switch targetChoice {
+	case "1":
+		// StdOut integration
+		cfg.StdOut.URL = askString(reader, "StdOut instance URL", "")
+		if cfg.StdOut.URL != "" {
+			cfg.StdOut.URL = strings.TrimRight(cfg.StdOut.URL, "/")
+			fmt.Println()
+			fmt.Printf("  %sHow do you want to authenticate?%s\n", bold, reset)
+			fmt.Printf("  %s1)%s Paste an existing API token\n", cyan, reset)
+			fmt.Printf("  %s2)%s Create one in the browser at %s/app/settings\n", cyan, reset, cfg.StdOut.URL)
+			fmt.Println()
+			cfg.StdOut.Token = askString(reader, "API token", "")
+			if cfg.StdOut.Token == "" {
+				fmt.Printf("  %sNo token provided — you can add it later in the config file.%s\n", yellow, reset)
+			}
 		}
+
+	case "2":
+		// Generic webhook
+		webhookURL := askString(reader, "Webhook URL (POST endpoint)", "")
+		if webhookURL != "" {
+			target := TargetConfig{
+				Name: "webhook",
+				URL:  webhookURL,
+			}
+			webhookToken := askString(reader, "Bearer token (optional)", "")
+			if webhookToken != "" {
+				target.Token = webhookToken
+			}
+			cfg.Targets = append(cfg.Targets, target)
+		}
+
+	case "3":
+		// File output
+		cfg.OutputFile = askString(reader, "Output file path", "/data/scan-results.json")
+
+	default:
+		fmt.Printf("  %sNo target configured — use --output json or --output markdown to view results.%s\n", dim, reset)
 	}
+
+	fmt.Println()
 
 	// Phase 4: Scheduling
 	fmt.Printf("  %sScheduling%s\n", bold, reset)
 	fmt.Printf("  %s──────────%s\n", dim, reset)
 	fmt.Println()
 	fmt.Printf("  %sThe scanner can run on a schedule and report only changes (delta mode).%s\n", dim, reset)
-	fmt.Printf("  %sSchedule can also be managed from StdOut's account settings.%s\n", dim, reset)
 	fmt.Println()
 
 	if askYesNo(reader, "Enable scheduled scanning", false) {
@@ -144,8 +177,8 @@ func PrintPostSetup(configPath string) {
 	fmt.Printf("  %s✓ Config saved to %s%s\n\n", green, configPath, reset)
 	fmt.Printf("  %sNext steps:%s\n", bold, reset)
 	fmt.Printf("  • Run %sstdout-scanner scan%s to scan now\n", cyan, reset)
-	fmt.Printf("  • Run %sstdout-scanner scan --schedule daily%s for recurring scans\n", cyan, reset)
 	fmt.Printf("  • Run %sstdout-scanner scan --delta%s to compare against last scan\n", cyan, reset)
+	fmt.Printf("  • Run %sstdout-scanner scan --schedule daily%s for recurring scans\n", cyan, reset)
 	fmt.Printf("  • Edit %s%s%s to change settings\n", cyan, configPath, reset)
 	fmt.Println()
 }
