@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/charlieseay/stdout-scanner/internal/docker"
 	"github.com/charlieseay/stdout-scanner/internal/host"
 	"github.com/charlieseay/stdout-scanner/internal/metrics"
+	"github.com/charlieseay/stdout-scanner/internal/network"
 	"github.com/charlieseay/stdout-scanner/internal/output"
 )
 
@@ -84,6 +86,9 @@ func runScan(args []string) {
 	configPath := fs.String("config", "", "Config file path (default: auto-detected)")
 	skipHost := fs.Bool("skip-host", false, "Skip host info collection")
 	skipMetrics := fs.Bool("skip-metrics", false, "Skip resource metrics collection")
+	scanNetwork := fs.Bool("scan-network", false, "Enable network device discovery (overrides config)")
+	subnets := fs.String("subnets", "", "Subnet(s) to scan, comma-separated (e.g. 192.168.0.0/24)")
+	scanSNMP := fs.Bool("scan-snmp", true, "Attempt SNMP queries on discovered devices")
 	dryRun := fs.Bool("dry-run", false, "Discover but don't push to StdOut")
 	showVersion := fs.Bool("version", false, "Print version and exit")
 	fs.Parse(args)
@@ -114,6 +119,16 @@ func runScan(args []string) {
 	}
 	if *skipMetrics {
 		cfg.Modules.Metrics = false
+	}
+	if *scanNetwork {
+		cfg.Modules.Network = true
+	}
+	if *subnets != "" {
+		cfg.Modules.Network = true
+		cfg.Network.Subnets = strings.Split(*subnets, ",")
+		for i := range cfg.Network.Subnets {
+			cfg.Network.Subnets[i] = strings.TrimSpace(cfg.Network.Subnets[i])
+		}
 	}
 
 	// Track which modules ran
@@ -176,6 +191,39 @@ func runScan(args []string) {
 		modules = append(modules, "metrics")
 	}
 
+	// Network device discovery
+	var networkDevices []network.ScanResult
+	if cfg.Modules.Network {
+		// Determine subnets to scan
+		scanSubnets := cfg.Network.Subnets
+		if len(scanSubnets) == 0 {
+			if detected := network.DetectSubnet(); detected != "" {
+				scanSubnets = []string{detected}
+				fmt.Fprintf(os.Stderr, "Auto-detected subnet: %s\n", detected)
+			} else {
+				fmt.Fprintln(os.Stderr, "Network scan: no subnet detected or configured, skipping")
+			}
+		}
+
+		opts := network.ScanOptions{
+			ScanPorts: true,
+			ScanSNMP:  *scanSNMP,
+		}
+
+		ctx := context.Background()
+		for _, subnet := range scanSubnets {
+			fmt.Fprintf(os.Stderr, "Scanning network %s...\n", subnet)
+			result, err := network.ScanSubnet(ctx, subnet, opts)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Network scan %s failed: %v\n", subnet, err)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "  Found %d devices on %s\n", len(result.Devices), subnet)
+			networkDevices = append(networkDevices, *result)
+		}
+		modules = append(modules, "network")
+	}
+
 	// Build scan result
 	scan := output.ScanResult{
 		Version:          "2",
@@ -186,6 +234,7 @@ func runScan(args []string) {
 		Containers:       containers,
 		ContainerMetrics: containerMetrics,
 		Networks:         networks,
+		NetworkDevices:   networkDevices,
 	}
 
 	// Output mode

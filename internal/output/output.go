@@ -8,6 +8,7 @@ import (
 	"github.com/charlieseay/stdout-scanner/internal/docker"
 	"github.com/charlieseay/stdout-scanner/internal/host"
 	"github.com/charlieseay/stdout-scanner/internal/metrics"
+	"github.com/charlieseay/stdout-scanner/internal/network"
 )
 
 type ScanResult struct {
@@ -19,6 +20,7 @@ type ScanResult struct {
 	Containers       []docker.Container       `json:"containers,omitempty"`
 	ContainerMetrics []metrics.ContainerMetrics `json:"container_metrics,omitempty"`
 	Networks         []docker.Network         `json:"networks,omitempty"`
+	NetworkDevices   []network.ScanResult     `json:"network_devices,omitempty"`
 }
 
 func Now() string {
@@ -124,6 +126,53 @@ func RenderMarkdown(scan ScanResult) string {
 				}
 			}
 
+			b.WriteString("\n")
+		}
+	}
+
+	// Network Devices
+	for _, netScan := range scan.NetworkDevices {
+		b.WriteString(fmt.Sprintf("## Network Devices — %s (%d found)\n\n", netScan.Subnet, len(netScan.Devices)))
+
+		for _, dev := range netScan.Devices {
+			label := dev.IP
+			if dev.Hostname != "" {
+				label = fmt.Sprintf("%s (%s)", dev.Hostname, dev.IP)
+			}
+			b.WriteString(fmt.Sprintf("### %s\n", label))
+			b.WriteString(fmt.Sprintf("- Type: %s\n", dev.Type))
+			if dev.MAC != "" {
+				vendor := ""
+				if dev.Vendor != "" {
+					vendor = " (" + dev.Vendor + ")"
+				}
+				b.WriteString(fmt.Sprintf("- MAC: %s%s\n", dev.MAC, vendor))
+			}
+			if len(dev.Ports) > 0 {
+				var portStrs []string
+				for _, p := range dev.Ports {
+					if p.Service != "" {
+						portStrs = append(portStrs, fmt.Sprintf("%d/%s (%s)", p.Number, p.Protocol, p.Service))
+					} else {
+						portStrs = append(portStrs, fmt.Sprintf("%d/%s", p.Number, p.Protocol))
+					}
+				}
+				b.WriteString(fmt.Sprintf("- Ports: %s\n", strings.Join(portStrs, ", ")))
+			}
+			if dev.SNMP != nil {
+				if dev.SNMP.SysName != "" {
+					b.WriteString(fmt.Sprintf("- SNMP Name: %s\n", dev.SNMP.SysName))
+				}
+				if dev.SNMP.SysDescr != "" {
+					b.WriteString(fmt.Sprintf("- SNMP Description: %s\n", dev.SNMP.SysDescr))
+				}
+				if dev.SNMP.SysLocation != "" {
+					b.WriteString(fmt.Sprintf("- SNMP Location: %s\n", dev.SNMP.SysLocation))
+				}
+				if dev.SNMP.Uptime != "" {
+					b.WriteString(fmt.Sprintf("- SNMP Uptime: %s\n", dev.SNMP.Uptime))
+				}
+			}
 			b.WriteString("\n")
 		}
 	}
