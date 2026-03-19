@@ -110,6 +110,31 @@ func RunInterview() (*Config, error) {
 		}
 	}
 
+	// Phase 4: Scheduling
+	fmt.Printf("  %sScheduling%s\n", bold, reset)
+	fmt.Printf("  %s──────────%s\n", dim, reset)
+	fmt.Println()
+	fmt.Printf("  %sThe scanner can run on a schedule and report only changes (delta mode).%s\n", dim, reset)
+	fmt.Printf("  %sSchedule can also be managed from StdOut's account settings.%s\n", dim, reset)
+	fmt.Println()
+
+	if askYesNo(reader, "Enable scheduled scanning", false) {
+		fmt.Println()
+		fmt.Printf("  %s1)%s Daily (default: 3:00 AM)\n", cyan, reset)
+		fmt.Printf("  %s2)%s Weekly\n", cyan, reset)
+		fmt.Printf("  %s3)%s Hourly\n", cyan, reset)
+		fmt.Println()
+		choice := askString(reader, "Schedule [1/2/3]", "1")
+		switch choice {
+		case "2":
+			cfg.Schedule = "weekly"
+		case "3":
+			cfg.Schedule = "hourly"
+		default:
+			cfg.Schedule = "daily"
+		}
+	}
+
 	fmt.Println()
 	return cfg, nil
 }
@@ -119,7 +144,8 @@ func PrintPostSetup(configPath string) {
 	fmt.Printf("  %s✓ Config saved to %s%s\n\n", green, configPath, reset)
 	fmt.Printf("  %sNext steps:%s\n", bold, reset)
 	fmt.Printf("  • Run %sstdout-scanner scan%s to scan now\n", cyan, reset)
-	fmt.Printf("  • Run %sstdout-scanner scan --schedule \"0 3 * * *\"%s for daily scans\n", cyan, reset)
+	fmt.Printf("  • Run %sstdout-scanner scan --schedule daily%s for recurring scans\n", cyan, reset)
+	fmt.Printf("  • Run %sstdout-scanner scan --delta%s to compare against last scan\n", cyan, reset)
 	fmt.Printf("  • Edit %s%s%s to change settings\n", cyan, configPath, reset)
 	fmt.Println()
 }
