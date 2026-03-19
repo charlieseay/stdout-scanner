@@ -2,7 +2,10 @@ module github.com/charlieseay/stdout-scanner
 
 go 1.23
 
-require github.com/docker/docker v27.5.1+incompatible
+require (
+	github.com/docker/docker v27.5.1+incompatible
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
