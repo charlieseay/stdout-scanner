@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.13
 
 require (
-	github.com/docker/docker v27.5.1+incompatible
+	github.com/docker/docker v28.0.0+incompatible
 	github.com/gosnmp/gosnmp v1.43.2
 	gopkg.in/yaml.v3 v3.0.1
 )
