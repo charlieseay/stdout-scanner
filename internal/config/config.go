@@ -46,7 +46,9 @@ type ModulesConfig struct {
 }
 
 type NetworkConfig struct {
-	Subnets []string `yaml:"subnets,omitempty"`
+	Subnets        []string `yaml:"subnets,omitempty"`
+	TargetFilter   string   `yaml:"target_filter,omitempty"` // all, servers, endpoints
+	CredentialsFile string  `yaml:"credentials_file,omitempty"`
 }
 
 // DefaultPath returns the default config file location.

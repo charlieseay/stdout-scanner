@@ -7,11 +7,22 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/charlieseay/stdout-scanner/internal/credentials"
+	"github.com/gosnmp/gosnmp"
 )
 
 // SNMP OIDs for system MIB-2 (RFC 1213) — these are universal across
 // all SNMP-capable devices.
-var snmpOIDs = map[string]string{
+var snmpOIDs = []string{
+	"1.3.6.1.2.1.1.1.0", // sysDescr
+	"1.3.6.1.2.1.1.3.0", // sysUpTime
+	"1.3.6.1.2.1.1.4.0", // sysContact
+	"1.3.6.1.2.1.1.5.0", // sysName
+	"1.3.6.1.2.1.1.6.0", // sysLocation
+}
+
+var oidFieldMap = map[string]string{
 	"1.3.6.1.2.1.1.1.0": "sysDescr",
 	"1.3.6.1.2.1.1.3.0": "sysUpTime",
 	"1.3.6.1.2.1.1.4.0": "sysContact",
@@ -19,30 +30,94 @@ var snmpOIDs = map[string]string{
 	"1.3.6.1.2.1.1.6.0": "sysLocation",
 }
 
-// querySNMP attempts an SNMPv2c GET on the standard system OIDs.
-// Uses the "public" community string (read-only, default on most devices).
+// querySNMP attempts SNMP GET on the standard system OIDs using
+// the provided credentials. Tries each matching credential in order;
+// first successful response wins.
 // Returns nil if the device doesn't respond to SNMP.
-//
-// We implement a minimal SNMPv2c GET ourselves rather than importing
-// a full SNMP library — keeps the binary small and dependency-free.
-func querySNMP(ctx context.Context, ip string) *SNMPInfo {
-	addr := fmt.Sprintf("%s:161", ip)
+func querySNMP(ctx context.Context, ip string, creds []credentials.SNMPCredential) *SNMPInfo {
+	if len(creds) == 0 {
+		return nil
+	}
 
-	// Quick check: is UDP 161 reachable? Send a valid GetRequest.
+	for _, cred := range creds {
+		info := trySNMPCredential(ctx, ip, cred)
+		if info != nil {
+			fmt.Fprintf(os.Stderr, "    SNMP %s (v%s): %s (%s)\n", ip, cred.Version, info.SysName, info.SysDescr)
+			return info
+		}
+	}
+
+	return nil
+}
+
+// trySNMPCredential attempts to query a device with a single credential set.
+func trySNMPCredential(ctx context.Context, ip string, cred credentials.SNMPCredential) *SNMPInfo {
+	g := &gosnmp.GoSNMP{
+		Target:    ip,
+		Port:      161,
+		Timeout:   2 * time.Second,
+		Retries:   1,
+		MaxOids:   5,
+	}
+
+	switch cred.Version {
+	case "1":
+		g.Version = gosnmp.Version1
+		g.Community = cred.Community
+	case "2c":
+		g.Version = gosnmp.Version2c
+		g.Community = cred.Community
+	case "3":
+		g.Version = gosnmp.Version3
+		g.SecurityModel = gosnmp.UserSecurityModel
+		g.MsgFlags = snmpSecurityLevel(cred.SecurityLevel)
+		g.SecurityParameters = &gosnmp.UsmSecurityParameters{
+			UserName:                 cred.Username,
+			AuthenticationProtocol:   snmpAuthProtocol(cred.AuthProtocol),
+			AuthenticationPassphrase: cred.AuthPassphrase,
+			PrivacyProtocol:          snmpPrivProtocol(cred.PrivProtocol),
+			PrivacyPassphrase:        cred.PrivPassphrase,
+		}
+	default:
+		return nil
+	}
+
+	if err := g.Connect(); err != nil {
+		return nil
+	}
+	defer g.Conn.Close()
+
+	result, err := g.Get(snmpOIDs)
+	if err != nil {
+		return nil
+	}
+
 	info := &SNMPInfo{}
 	got := false
 
-	for oid, field := range snmpOIDs {
-		val := snmpGet(ctx, addr, "public", oid)
+	for _, pdu := range result.Variables {
+		oid := strings.TrimPrefix(pdu.Name, ".")
+		field, ok := oidFieldMap[oid]
+		if !ok {
+			continue
+		}
+
+		val := pduToString(pdu)
 		if val == "" {
 			continue
 		}
+
 		got = true
 		switch field {
 		case "sysDescr":
 			info.SysDescr = val
 		case "sysUpTime":
-			info.Uptime = formatSNMPUptime(val)
+			if pdu.Type == gosnmp.TimeTicks {
+				ticks := gosnmp.ToBigInt(pdu.Value).Uint64()
+				info.Uptime = formatSNMPUptime(ticks)
+			} else {
+				info.Uptime = val
+			}
 		case "sysContact":
 			info.SysContact = val
 		case "sysName":
@@ -55,261 +130,66 @@ func querySNMP(ctx context.Context, ip string) *SNMPInfo {
 	if !got {
 		return nil
 	}
-
-	fmt.Fprintf(os.Stderr, "    SNMP %s: %s (%s)\n", ip, info.SysName, info.SysDescr)
 	return info
 }
 
-// snmpGet performs a single SNMPv2c GetRequest for one OID.
-// Returns the string value or empty string on failure.
-func snmpGet(ctx context.Context, addr, community, oid string) string {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(2 * time.Second)
+func pduToString(pdu gosnmp.SnmpPDU) string {
+	switch pdu.Type {
+	case gosnmp.OctetString:
+		return string(pdu.Value.([]byte))
+	case gosnmp.Integer:
+		return fmt.Sprintf("%d", gosnmp.ToBigInt(pdu.Value).Int64())
+	case gosnmp.TimeTicks:
+		return fmt.Sprintf("%d", gosnmp.ToBigInt(pdu.Value).Uint64())
+	default:
+		return fmt.Sprintf("%v", pdu.Value)
 	}
-
-	conn, err := net.DialTimeout("udp", addr, 1*time.Second)
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-	conn.SetDeadline(deadline)
-
-	// Build SNMPv2c GetRequest packet
-	pkt := buildGetRequest(community, oid)
-	if _, err := conn.Write(pkt); err != nil {
-		return ""
-	}
-
-	buf := make([]byte, 1500)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return ""
-	}
-
-	return parseGetResponse(buf[:n])
 }
 
-// buildGetRequest constructs a minimal SNMPv2c GetRequest PDU.
-func buildGetRequest(community, oid string) []byte {
-	// Encode OID
-	oidBytes := encodeOID(oid)
-
-	// VarBind: SEQUENCE { OID, NULL }
-	varbind := asn1Sequence(append(oidBytes, 0x05, 0x00)) // OID + NULL
-
-	// VarBindList: SEQUENCE { varbind }
-	varbindList := asn1Sequence(varbind)
-
-	// PDU: GetRequest [0] { request-id, error-status, error-index, varbindlist }
-	requestID := []byte{0x02, 0x01, 0x01}       // INTEGER 1
-	errorStatus := []byte{0x02, 0x01, 0x00}     // INTEGER 0
-	errorIndex := []byte{0x02, 0x01, 0x00}      // INTEGER 0
-
-	pduContent := append(requestID, errorStatus...)
-	pduContent = append(pduContent, errorIndex...)
-	pduContent = append(pduContent, varbindList...)
-
-	// GetRequest-PDU [0] IMPLICIT
-	pdu := asn1Constructed(0xa0, pduContent)
-
-	// Message: SEQUENCE { version, community, pdu }
-	version := []byte{0x02, 0x01, 0x01} // INTEGER 1 (SNMPv2c)
-	communityBytes := asn1OctetString([]byte(community))
-
-	msgContent := append(version, communityBytes...)
-	msgContent = append(msgContent, pdu...)
-
-	return asn1Sequence(msgContent)
+func snmpSecurityLevel(level string) gosnmp.SnmpV3MsgFlags {
+	switch level {
+	case "authPriv":
+		return gosnmp.AuthPriv
+	case "authNoPriv":
+		return gosnmp.AuthNoPriv
+	default:
+		return gosnmp.NoAuthNoPriv
+	}
 }
 
-// parseGetResponse extracts the value from an SNMP GetResponse.
-func parseGetResponse(data []byte) string {
-	// We need to navigate: SEQUENCE > skip version+community > PDU > skip ids > VarBindList > VarBind > value
-	// This is a minimal parser — we look for the value after the OID in the response.
-
-	// Find the last varbind value. Walk through looking for OctetString or Integer values
-	// after position ~30 (past headers).
-	if len(data) < 20 {
-		return ""
+func snmpAuthProtocol(proto string) gosnmp.SnmpV3AuthProtocol {
+	switch strings.ToUpper(proto) {
+	case "MD5":
+		return gosnmp.MD5
+	case "SHA", "SHA-1":
+		return gosnmp.SHA
+	case "SHA-256":
+		return gosnmp.SHA256
+	case "SHA-512":
+		return gosnmp.SHA512
+	default:
+		return gosnmp.NoAuth
 	}
-
-	// Simple approach: scan for value types in the tail of the response
-	// The response structure is well-defined, so find the VarBind value.
-	pos := 0
-
-	// Skip outer SEQUENCE
-	pos, _ = skipTLV(data, pos)
-	if pos < 0 {
-		return ""
-	}
-
-	// We're inside the outer sequence. Walk through TLVs.
-	// version (INTEGER), community (OCTET STRING), PDU (CONTEXT[2])
-	// Inside PDU: request-id, error-status, error-index, varbindlist
-	// Inside varbindlist: varbind (SEQUENCE of OID + value)
-
-	// Rather than full ASN.1 parsing, find the value at the end.
-	// The last TLV in the packet is the value we want.
-	return extractLastValue(data)
 }
 
-// extractLastValue finds the last OctetString, Integer, or TimeTicks value
-// in an SNMP response. Works because the response is a flat-ish structure
-// and the value is always last.
-func extractLastValue(data []byte) string {
-	// Walk through the data looking for value TLVs
-	i := 0
-	lastVal := ""
-
-	for i < len(data)-2 {
-		tag := data[i]
-		length, lenSize := decodeLength(data[i+1:])
-		if length < 0 || lenSize < 0 {
-			i++
-			continue
-		}
-
-		start := i + 1 + lenSize
-		end := start + length
-
-		if end > len(data) {
-			i++
-			continue
-		}
-
-		switch tag {
-		case 0x04: // OCTET STRING
-			lastVal = string(data[start:end])
-		case 0x02: // INTEGER
-			if length <= 4 {
-				val := 0
-				for _, b := range data[start:end] {
-					val = val<<8 | int(b)
-				}
-				lastVal = fmt.Sprintf("%d", val)
-			}
-		case 0x43: // TimeTicks
-			if length <= 4 {
-				val := uint32(0)
-				for _, b := range data[start:end] {
-					val = val<<8 | uint32(b)
-				}
-				// TimeTicks is in hundredths of a second
-				lastVal = fmt.Sprintf("%d", val)
-			}
-		case 0x30, 0xa2, 0xa0: // SEQUENCE, GetResponse, GetRequest — recurse into
-			i++
-			continue
-		}
-
-		i = end
+func snmpPrivProtocol(proto string) gosnmp.SnmpV3PrivProtocol {
+	switch strings.ToUpper(proto) {
+	case "DES":
+		return gosnmp.DES
+	case "AES", "AES-128":
+		return gosnmp.AES
+	case "AES-192":
+		return gosnmp.AES192
+	case "AES-256":
+		return gosnmp.AES256
+	default:
+		return gosnmp.NoPriv
 	}
-
-	return lastVal
-}
-
-func decodeLength(data []byte) (int, int) {
-	if len(data) == 0 {
-		return -1, -1
-	}
-	if data[0] < 0x80 {
-		return int(data[0]), 1
-	}
-	numBytes := int(data[0] & 0x7f)
-	if numBytes == 0 || numBytes > 4 || len(data) < numBytes+1 {
-		return -1, -1
-	}
-	length := 0
-	for i := 1; i <= numBytes; i++ {
-		length = length<<8 | int(data[i])
-	}
-	return length, numBytes + 1
-}
-
-func skipTLV(data []byte, pos int) (int, int) {
-	if pos >= len(data) {
-		return -1, -1
-	}
-	if pos+1 >= len(data) {
-		return -1, -1
-	}
-	length, lenSize := decodeLength(data[pos+1:])
-	if length < 0 {
-		return -1, -1
-	}
-	// Return content start position and content end
-	contentStart := pos + 1 + lenSize
-	return contentStart, contentStart + length
-}
-
-// encodeOID encodes a dotted OID string as ASN.1 OID bytes with tag.
-func encodeOID(oid string) []byte {
-	parts := strings.Split(oid, ".")
-	if len(parts) < 2 {
-		return nil
-	}
-
-	var nums []int
-	for _, p := range parts {
-		n := 0
-		for _, c := range p {
-			n = n*10 + int(c-'0')
-		}
-		nums = append(nums, n)
-	}
-
-	// First two components encoded as 40*X + Y
-	encoded := []byte{byte(40*nums[0] + nums[1])}
-
-	for _, n := range nums[2:] {
-		encoded = append(encoded, encodeSubOID(n)...)
-	}
-
-	// Tag 0x06 (OID) + length + content
-	result := []byte{0x06, byte(len(encoded))}
-	return append(result, encoded...)
-}
-
-func encodeSubOID(val int) []byte {
-	if val < 128 {
-		return []byte{byte(val)}
-	}
-	var parts []byte
-	parts = append(parts, byte(val&0x7f))
-	val >>= 7
-	for val > 0 {
-		parts = append(parts, byte(val&0x7f|0x80))
-		val >>= 7
-	}
-	// Reverse
-	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
-		parts[i], parts[j] = parts[j], parts[i]
-	}
-	return parts
-}
-
-func asn1Sequence(content []byte) []byte {
-	return asn1Constructed(0x30, content)
-}
-
-func asn1Constructed(tag byte, content []byte) []byte {
-	return append([]byte{tag, byte(len(content))}, content...)
-}
-
-func asn1OctetString(val []byte) []byte {
-	return append([]byte{0x04, byte(len(val))}, val...)
 }
 
 // formatSNMPUptime converts TimeTicks (hundredths of seconds) to human-readable.
-func formatSNMPUptime(ticks string) string {
-	val := 0
-	for _, c := range ticks {
-		if c >= '0' && c <= '9' {
-			val = val*10 + int(c-'0')
-		}
-	}
-	secs := val / 100
+func formatSNMPUptime(ticks uint64) string {
+	secs := ticks / 100
 	days := secs / 86400
 	hours := (secs % 86400) / 3600
 	mins := (secs % 3600) / 60
@@ -321,4 +201,14 @@ func formatSNMPUptime(ticks string) string {
 		return fmt.Sprintf("%dh %dm", hours, mins)
 	}
 	return fmt.Sprintf("%dm", mins)
+}
+
+// DetectSNMPPort checks if UDP 161 is potentially reachable.
+func DetectSNMPPort(ip string) bool {
+	conn, err := net.DialTimeout("udp", fmt.Sprintf("%s:161", ip), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }

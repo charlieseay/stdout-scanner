@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/charlieseay/stdout-scanner/internal/credentials"
 )
 
 // Device represents a discovered network device.
@@ -46,8 +48,10 @@ type ScanResult struct {
 
 // ScanOptions controls what the network scanner does.
 type ScanOptions struct {
-	ScanPorts bool // probe common TCP ports
-	ScanSNMP  bool // attempt SNMP v2c queries (community "public")
+	ScanPorts    bool               // probe common TCP ports
+	ScanSNMP     bool               // attempt SNMP queries
+	TargetFilter string             // "all", "servers", or "endpoints"
+	Credentials  *credentials.Store // credential store for SNMP/SSH
 }
 
 // commonPorts are the ports we probe by default — enough to identify
@@ -136,6 +140,22 @@ func ScanSubnet(ctx context.Context, subnet string, opts ScanOptions) (*ScanResu
 		}(ip)
 	}
 	wg.Wait()
+
+	// Step 3: Apply target filter if set
+	filter := opts.TargetFilter
+	if filter == "" {
+		filter = "all"
+	}
+	if filter != "all" {
+		var filtered []Device
+		for _, dev := range result.Devices {
+			if MatchesTargetFilter(dev, filter) {
+				filtered = append(filtered, dev)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "  Target filter %q: %d → %d devices\n", filter, len(result.Devices), len(filtered))
+		result.Devices = filtered
+	}
 
 	return result, nil
 }
@@ -274,9 +294,14 @@ func enrichDevice(ctx context.Context, ip string, opts ScanOptions) Device {
 		dev.Ports = scanDevicePorts(ctx, ip)
 	}
 
-	// SNMP query
+	// SNMP query — resolve credentials for this host
 	if opts.ScanSNMP {
-		dev.SNMP = querySNMP(ctx, ip)
+		creds := opts.Credentials
+		if creds == nil {
+			creds = credentials.DefaultStore()
+		}
+		snmpCreds := creds.SNMPForHost(ip)
+		dev.SNMP = querySNMP(ctx, ip, snmpCreds)
 	}
 
 	// Infer type from all available data

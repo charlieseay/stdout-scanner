@@ -10,6 +10,7 @@ import (
 
 	"github.com/charlieseay/stdout-scanner/internal/api"
 	"github.com/charlieseay/stdout-scanner/internal/config"
+	"github.com/charlieseay/stdout-scanner/internal/credentials"
 	"github.com/charlieseay/stdout-scanner/internal/delta"
 	"github.com/charlieseay/stdout-scanner/internal/docker"
 	"github.com/charlieseay/stdout-scanner/internal/host"
@@ -99,6 +100,8 @@ func runScan(args []string) {
 	scheduleFlag := fs.String("schedule", "", "Run on schedule: hourly, daily, daily@03:00, weekly@sun@03:00")
 	webhookURL := fs.String("webhook", "", "POST scan results to this URL (generic webhook)")
 	saveTo := fs.String("save-to", "", "Save scan results to this JSON file")
+	scanTargets := fs.String("scan-targets", "", "Filter discovered hosts: all, servers, endpoints (default: all)")
+	credentialsFile := fs.String("credentials-file", "", "Path to YAML credentials config for SNMP/SSH")
 	dryRun := fs.Bool("dry-run", false, "Discover but don't push")
 	showVersion := fs.Bool("version", false, "Print version and exit")
 	fs.Parse(args)
@@ -163,6 +166,39 @@ func runScan(args []string) {
 		for i := range cfg.Network.Subnets {
 			cfg.Network.Subnets[i] = strings.TrimSpace(cfg.Network.Subnets[i])
 		}
+	}
+
+	// Apply scan-targets override
+	if *scanTargets != "" {
+		switch *scanTargets {
+		case "all", "servers", "endpoints":
+			cfg.Network.TargetFilter = *scanTargets
+		default:
+			fmt.Fprintf(os.Stderr, "Invalid --scan-targets value %q (use all, servers, or endpoints)\n", *scanTargets)
+			os.Exit(1)
+		}
+	}
+	if cfg.Network.TargetFilter == "" {
+		cfg.Network.TargetFilter = "all"
+	}
+
+	// Load credentials
+	credsPath := *credentialsFile
+	if credsPath == "" {
+		credsPath = cfg.Network.CredentialsFile
+	}
+	var credStore *credentials.Store
+	if credsPath != "" {
+		var err error
+		credStore, err = credentials.LoadFile(credsPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load credentials: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Loaded credentials: %s (%d SNMP, %d SSH)\n",
+			credsPath, len(credStore.SNMP), len(credStore.SSH))
+	} else {
+		credStore = credentials.DefaultStore()
 	}
 
 	// Track which modules ran
@@ -240,8 +276,10 @@ func runScan(args []string) {
 		}
 
 		opts := network.ScanOptions{
-			ScanPorts: true,
-			ScanSNMP:  *scanSNMP,
+			ScanPorts:    true,
+			ScanSNMP:     *scanSNMP,
+			TargetFilter: cfg.Network.TargetFilter,
+			Credentials:  credStore,
 		}
 
 		ctx := context.Background()
