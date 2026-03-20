@@ -19,12 +19,13 @@ const (
 // We use lightweight signals: open ports from the quick probe,
 // OUI vendor, hostname, and device type if already inferred.
 func ClassifyHost(dev Device) HostClass {
-	// If type was already inferred, use it
+	// If type was already inferred with high confidence, use it
 	switch dev.Type {
 	case "server", "nas", "router", "switch", "ups", "printer":
 		return HostClassServer
-	case "workstation", "iot":
+	case "iot":
 		return HostClassEndpoint
+	// "workstation" is low-confidence from inferDeviceType — re-evaluate below
 	}
 
 	// Check OUI for mobile/endpoint vendors

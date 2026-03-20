@@ -212,8 +212,8 @@ func runScan(args []string) {
 		var err error
 		containers, networks, err = docker.Discover()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Docker discovery failed: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Docker discovery failed: %v (continuing without container data)\n", err)
+			// Non-fatal — network scan and other modules can still run
 		}
 		fmt.Fprintf(os.Stderr, "Found %d containers, %d networks\n", len(containers), len(networks))
 		modules = append(modules, "docker")
