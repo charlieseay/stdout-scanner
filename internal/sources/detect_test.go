@@ -117,7 +117,7 @@ func TestDetectToolDockerMatch(t *testing.T) {
 		endpoint:   "http://%s:9090",
 	}
 
-	source := detectTool(tool, containers)
+	source := detectToolDocker(tool, containers)
 	if source == nil {
 		t.Fatal("detectTool returned nil for matching Docker container")
 	}
@@ -158,7 +158,7 @@ func TestDetectToolDockerNoMatch(t *testing.T) {
 	// This should not match via Docker (no trivy container).
 	// It also won't match via binary/config on this test system.
 	// The tool may or may not be in PATH — so we just verify Docker didn't match.
-	source := detectTool(tool, containers)
+	source := detectToolDocker(tool, containers)
 	if source != nil && source.DetectedVia == DetectedViaDocker {
 		t.Error("detectTool should not have matched trivy via Docker with only nginx container")
 	}
@@ -185,7 +185,7 @@ func TestDetectToolVersionFromLatestTag(t *testing.T) {
 		endpoint:   "http://%s:3000",
 	}
 
-	source := detectTool(tool, containers)
+	source := detectToolDocker(tool, containers)
 	if source == nil {
 		t.Fatal("detectTool returned nil for matching Docker container")
 	}

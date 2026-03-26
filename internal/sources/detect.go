@@ -246,6 +246,10 @@ func Detect(containers []docker.Container) *SourcesResult {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 10)
 
+	// Phase 1: Docker detection (highest confidence)
+	dockerDetected := make(map[string]bool)    // tool name → detected
+	claimedPorts := make(map[uint16]string)     // port → tool name (from Docker)
+
 	for _, tool := range knownTools {
 		wg.Add(1)
 		go func(t toolDef) {
@@ -253,7 +257,37 @@ func Detect(containers []docker.Container) *SourcesResult {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			source := detectTool(t, containerImages)
+			source := detectToolDocker(t, containerImages)
+			if source != nil {
+				mu.Lock()
+				result.Detected = append(result.Detected, *source)
+				dockerDetected[t.name] = true
+				if t.port > 0 {
+					claimedPorts[t.port] = t.name
+				}
+				mu.Unlock()
+			}
+		}(tool)
+	}
+	wg.Wait()
+
+	// Phase 2: Non-Docker detection (port probe, binary, config)
+	// Skip port probes for ports already claimed by Docker-detected tools
+	for _, tool := range knownTools {
+		if dockerDetected[tool.name] {
+			continue // Already found via Docker
+		}
+		wg.Add(1)
+		go func(t toolDef) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			mu.Lock()
+			portClaimed := claimedPorts[t.port]
+			mu.Unlock()
+
+			source := detectToolNonDocker(t, portClaimed)
 			if source != nil {
 				mu.Lock()
 				result.Detected = append(result.Detected, *source)
@@ -269,10 +303,9 @@ func Detect(containers []docker.Container) *SourcesResult {
 	return result
 }
 
-// detectTool attempts to find a single tool using all available methods.
-// Returns nil if the tool is not found by any method.
-func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSource {
-	// Strategy 1: Docker container by image name
+// detectToolDocker attempts to find a tool via Docker container image matching.
+// This is the highest-confidence detection method.
+func detectToolDocker(t toolDef, containerImages map[string]docker.Container) *DataSource {
 	for _, img := range t.images {
 		imgLower := strings.ToLower(img)
 		for ciImg, container := range containerImages {
@@ -284,10 +317,8 @@ func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSou
 					Status:      container.Status,
 				}
 
-				// Build endpoint from container's published port or default
 				source.Endpoint = buildEndpoint(t, container)
 
-				// Extract version from image tag
 				if idx := strings.LastIndex(container.Image, ":"); idx != -1 {
 					tag := container.Image[idx+1:]
 					if tag != "latest" && tag != "" {
@@ -295,7 +326,6 @@ func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSou
 					}
 				}
 
-				// Probe the endpoint to confirm accessibility
 				if t.port > 0 {
 					source.Accessible = probeEndpoint(source.Endpoint, t.probePath)
 				} else {
@@ -307,13 +337,19 @@ func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSou
 			}
 		}
 	}
+	return nil
+}
 
-	// Strategy 2: Port probe (only for tools with known ports)
-	if t.port > 0 {
+// detectToolNonDocker attempts to find a tool via port probing, binary lookup, or config files.
+// portClaimedBy is the name of a tool that already claimed this port via Docker detection —
+// if set, skip the port probe to avoid false positives.
+func detectToolNonDocker(t toolDef, portClaimedBy string) *DataSource {
+	// Strategy: Port probe (skip if port is already claimed by a Docker-detected tool)
+	if t.port > 0 && portClaimedBy == "" {
 		host := detectHost()
 		if isPortOpen(host, t.port) {
 			endpoint := fmt.Sprintf(t.endpoint, host)
-			accessible := probeEndpoint(endpoint, t.probePath)
+			accessible := probeEndpointStrict(endpoint, t)
 			if accessible {
 				source := &DataSource{
 					Name:        t.name,
@@ -323,7 +359,6 @@ func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSou
 					Status:      "running",
 					Accessible:  true,
 				}
-				// Try to get version from the probe response
 				source.Version = probeVersion(endpoint, t)
 				fmt.Fprintf(os.Stderr, "  Source: %s (%s) via port %d\n", t.name, t.sourceType, t.port)
 				return source
@@ -331,7 +366,7 @@ func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSou
 		}
 	}
 
-	// Strategy 3: Binary in PATH
+	// Strategy: Binary in PATH
 	for _, bin := range t.binaries {
 		if path, err := exec.LookPath(bin); err == nil {
 			source := &DataSource{
@@ -342,7 +377,6 @@ func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSou
 				Status:      "installed",
 				Accessible:  true,
 			}
-			// Try to get version from the binary
 			source.Version = getBinaryVersion(path, bin)
 			if source.Endpoint == "" {
 				source.Endpoint = fmt.Sprintf("%s://local", t.name)
@@ -352,7 +386,7 @@ func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSou
 		}
 	}
 
-	// Strategy 4: Config file presence
+	// Strategy: Config file presence
 	for _, cfgPath := range t.configPaths {
 		if _, err := os.Stat(cfgPath); err == nil {
 			source := &DataSource{
@@ -361,7 +395,7 @@ func detectTool(t toolDef, containerImages map[string]docker.Container) *DataSou
 				DetectedVia: DetectedViaConfig,
 				Endpoint:    t.endpoint,
 				Status:      "configured",
-				Accessible:  false, // config found but service might not be running
+				Accessible:  false,
 			}
 			if source.Endpoint == "" {
 				source.Endpoint = fmt.Sprintf("%s://local", t.name)
@@ -451,6 +485,80 @@ func probeEndpoint(baseURL, path string) bool {
 	// Consider anything that responds (even 401/403) as accessible —
 	// the service is there, it may just need auth.
 	return resp.StatusCode < 500
+}
+
+// probeEndpointStrict validates a port probe by checking response body content,
+// not just status code. This prevents false positives when multiple tools share a port.
+func probeEndpointStrict(baseURL string, t toolDef) bool {
+	if t.probePath == "" {
+		return false
+	}
+
+	url := strings.TrimRight(baseURL, "/") + t.probePath
+
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "stdout-scanner/2.0")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if err != nil {
+		return false
+	}
+
+	// Must get a non-error status
+	if resp.StatusCode >= 500 {
+		return false
+	}
+
+	bodyStr := strings.ToLower(string(body))
+
+	// Tool-specific body validation to prevent false positives
+	switch t.name {
+	case "prometheus":
+		return strings.Contains(bodyStr, "prometheus") || resp.StatusCode == 200 && t.probePath == "/-/healthy"
+	case "grafana":
+		return strings.Contains(bodyStr, "grafana") || strings.Contains(bodyStr, "\"database\"")
+	case "cadvisor":
+		return strings.Contains(bodyStr, "num_cores") || strings.Contains(bodyStr, "machine_id")
+	case "uptime-kuma":
+		return strings.Contains(bodyStr, "uptime") || strings.Contains(bodyStr, "heartbeat")
+	case "gatus":
+		return strings.Contains(bodyStr, "endpoints") || strings.Contains(bodyStr, "gatus")
+	case "loki":
+		return strings.Contains(bodyStr, "ready") || strings.Contains(bodyStr, "loki")
+	case "graylog":
+		return strings.Contains(bodyStr, "graylog") || strings.Contains(bodyStr, "cluster_id")
+	case "pihole":
+		return strings.Contains(bodyStr, "pihole") || strings.Contains(bodyStr, "dns_queries")
+	case "adguard-home":
+		return strings.Contains(bodyStr, "adguard") || strings.Contains(bodyStr, "dns_port")
+	case "crowdsec":
+		return strings.Contains(bodyStr, "crowdsec") || strings.Contains(bodyStr, "decisions")
+	default:
+		// For tools without specific validation, accept 2xx only
+		return resp.StatusCode >= 200 && resp.StatusCode < 300
+	}
 }
 
 // probeVersion attempts to extract a version string from a tool's API.
