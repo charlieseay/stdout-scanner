@@ -19,6 +19,7 @@ import (
 	"github.com/charlieseay/stdout-scanner/internal/output"
 	"github.com/charlieseay/stdout-scanner/internal/schedule"
 	"github.com/charlieseay/stdout-scanner/internal/sources"
+	"github.com/charlieseay/stdout-scanner/internal/update"
 )
 
 var (
@@ -40,6 +41,14 @@ func main() {
 		runScan(os.Args[2:])
 	case os.Args[1] == "version":
 		fmt.Printf("stdout-scanner %s\n", version)
+		// Check for updates when user explicitly asks about version
+		if info := update.Check(version); info != nil {
+			update.PrintUpdateNotice(info)
+		}
+	case os.Args[1] == "check-update":
+		runCheckUpdate()
+	case os.Args[1] == "update":
+		runSelfUpdate()
 	case strings.HasPrefix(os.Args[1], "-"):
 		runScan(os.Args[1:])
 	default:
@@ -435,6 +444,11 @@ func runScan(args []string) {
 
 	// One-shot output
 	emitScan(scan, *outputMode, *dryRun, cfg)
+
+	// Check for updates after scan (non-blocking, silent on failure)
+	if info := update.Check(version); info != nil {
+		update.PrintUpdateNotice(info)
+	}
 }
 
 // emitScan handles outputting or pushing a scan result.
@@ -510,6 +524,42 @@ func pushToTargets(scan output.ScanResult, cfg *config.Config) {
 			fmt.Fprintf(os.Stderr, "Saved.\n")
 		}
 	}
+}
+
+// runCheckUpdate checks for a newer version and prints the result.
+func runCheckUpdate() {
+	fmt.Printf("stdout-scanner %s\n", version)
+	fmt.Println("Checking for updates...")
+
+	info := update.Check(version)
+	if info == nil {
+		fmt.Println("You're up to date.")
+		return
+	}
+
+	update.PrintUpdateNotice(info)
+}
+
+// runSelfUpdate downloads and replaces the current binary with the latest release.
+func runSelfUpdate() {
+	fmt.Printf("stdout-scanner %s\n", version)
+
+	info := update.Check(version)
+	if info == nil {
+		fmt.Println("Already up to date.")
+		return
+	}
+
+	fmt.Printf("Downloading %s...\n", info.TagName)
+
+	if err := update.SelfUpdate(info); err != nil {
+		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "You can update manually by downloading from:")
+		fmt.Fprintf(os.Stderr, "  %s\n", info.HTMLURL)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Updated to %s. Restart the scanner to use the new version.\n", strings.TrimPrefix(info.TagName, "v"))
 }
 
 func formatBytesShort(b uint64) string {
