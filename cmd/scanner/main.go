@@ -18,6 +18,7 @@ import (
 	"github.com/charlieseay/stdout-scanner/internal/network"
 	"github.com/charlieseay/stdout-scanner/internal/output"
 	"github.com/charlieseay/stdout-scanner/internal/schedule"
+	"github.com/charlieseay/stdout-scanner/internal/sources"
 )
 
 var (
@@ -94,6 +95,7 @@ func runScan(args []string) {
 	scanSNMP := fs.Bool("scan-snmp", true, "Attempt SNMP queries on discovered devices")
 	scanDNS := fs.Bool("scan-dns", false, "Enable DNS/service discovery (overrides config)")
 	scanAuth := fs.Bool("scan-auth", false, "Enable auth detection (overrides config)")
+	scanSources := fs.Bool("scan-sources", false, "Detect installed tooling (Trivy, Prometheus, Loki, etc.)")
 	fullScan := fs.Bool("full", false, "Enable all discovery modules")
 	deltaMode := fs.Bool("delta", false, "Compare against previous scan, report changes only")
 	stateFile := fs.String("state-file", "", "Path to store previous scan for delta (default: from config)")
@@ -139,6 +141,7 @@ func runScan(args []string) {
 		cfg.Modules.Network = true
 		cfg.Modules.DNS = true
 		cfg.Modules.Auth = true
+		cfg.Modules.Sources = true
 	}
 	if *scanNetwork {
 		cfg.Modules.Network = true
@@ -150,6 +153,9 @@ func runScan(args []string) {
 	if *scanAuth {
 		cfg.Modules.Auth = true
 		cfg.Modules.Network = true // Auth requires network scan first
+	}
+	if *scanSources {
+		cfg.Modules.Sources = true
 	}
 	if *webhookURL != "" {
 		cfg.Targets = append(cfg.Targets, config.TargetConfig{
@@ -322,6 +328,16 @@ func runScan(args []string) {
 		modules = append(modules, "auth")
 	}
 
+	// Data source detection
+	var dataSources *sources.SourcesResult
+	if cfg.Modules.Sources {
+		fmt.Fprintln(os.Stderr, "Detecting data sources...")
+		dataSources = sources.Detect(containers)
+		fmt.Fprintf(os.Stderr, "Found %d data sources, %d types missing\n",
+			len(dataSources.Detected), len(dataSources.Missing))
+		modules = append(modules, "sources")
+	}
+
 	// Build scan result
 	scan := output.ScanResult{
 		Version:          "2",
@@ -335,6 +351,7 @@ func runScan(args []string) {
 		NetworkDevices:   networkDevices,
 		DNSResults:       dnsResults,
 		AuthResults:      authResults,
+		DataSources:      dataSources,
 	}
 
 	// Resolve state file path

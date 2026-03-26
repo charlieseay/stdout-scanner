@@ -43,6 +43,7 @@ type ModulesConfig struct {
 	Network bool `yaml:"network"`
 	DNS     bool `yaml:"dns"`
 	Auth    bool `yaml:"auth"`
+	Sources bool `yaml:"sources"`
 }
 
 type NetworkConfig struct {

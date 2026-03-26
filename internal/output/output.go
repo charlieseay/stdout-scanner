@@ -9,6 +9,7 @@ import (
 	"github.com/charlieseay/stdout-scanner/internal/host"
 	"github.com/charlieseay/stdout-scanner/internal/metrics"
 	"github.com/charlieseay/stdout-scanner/internal/network"
+	"github.com/charlieseay/stdout-scanner/internal/sources"
 )
 
 type ScanResult struct {
@@ -23,6 +24,7 @@ type ScanResult struct {
 	NetworkDevices   []network.ScanResult     `json:"network_devices,omitempty"`
 	DNSResults       []network.DNSResult      `json:"dns_results,omitempty"`
 	AuthResults      []network.AuthResult     `json:"auth_results,omitempty"`
+	DataSources      *sources.SourcesResult   `json:"data_sources,omitempty"`
 }
 
 func Now() string {
@@ -254,6 +256,32 @@ func RenderMarkdown(scan ScanResult) string {
 					line += fmt.Sprintf(" [%s]", svc.Service)
 				}
 				b.WriteString(line + "\n")
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// Data Sources
+	if scan.DataSources != nil {
+		if len(scan.DataSources.Detected) > 0 {
+			b.WriteString(fmt.Sprintf("## Data Sources (%d detected)\n\n", len(scan.DataSources.Detected)))
+			b.WriteString("| Tool | Type | Detected Via | Endpoint | Status | Version |\n")
+			b.WriteString("|------|------|-------------|----------|--------|--------|\n")
+			for _, src := range scan.DataSources.Detected {
+				version := src.Version
+				if version == "" {
+					version = "-"
+				}
+				b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s |\n",
+					src.Name, src.Type, src.DetectedVia, src.Endpoint, src.Status, version))
+			}
+			b.WriteString("\n")
+		}
+
+		if len(scan.DataSources.Missing) > 0 {
+			b.WriteString("## Missing Data Sources\n\n")
+			for _, m := range scan.DataSources.Missing {
+				b.WriteString(fmt.Sprintf("- **%s** — %s (recommended: %s)\n", m.Type, m.Reason, m.Recommendation))
 			}
 			b.WriteString("\n")
 		}
