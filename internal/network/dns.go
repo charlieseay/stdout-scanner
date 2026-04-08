@@ -261,7 +261,7 @@ func inspectTLSCert(ip string, port uint16) *CertInfo {
 	}
 
 	leaf := certs[0]
-	daysLeft := int(time.Until(leaf.NotAfter).Hours() / 24)
+	daysLeft := int(time.Until(leaf.NotAfter) / (24 * time.Hour))
 
 	info := &CertInfo{
 		Port:       port,

@@ -34,10 +34,19 @@ docker run --rm \
 --token     StdOut API token (required for push)
 --url       StdOut instance URL (required for push)
 --output    json or markdown (print to stdout instead of pushing)
+--full      Enable all detection modules
+--scan-sources Detect installed tooling (Prometheus, Trivy, Loki, etc.)
 --skip-host Skip host info collection
 --dry-run   Discover but don't push
 --version   Print version
 ```
+
+## Data source auto-registration
+
+When `--scan-sources` is enabled, scanner includes a `data_sources` block in
+the payload. StdOut uses this to auto-register supported sources during
+`/app/api/stacks/import` (currently Prometheus), so metrics enrichment can work
+without manual setup.
 
 ## Local output
 
