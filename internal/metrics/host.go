@@ -269,9 +269,9 @@ func readUptime() string {
 }
 
 func formatDuration(d time.Duration) string {
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	mins := int(d.Minutes()) % 60
+	days := int(d / (24 * time.Hour))
+	hours := int((d % (24 * time.Hour)) / time.Hour)
+	mins := int((d % time.Hour) / time.Minute)
 
 	if days > 0 {
 		return strconv.Itoa(days) + "d " + strconv.Itoa(hours) + "h " + strconv.Itoa(mins) + "m"
